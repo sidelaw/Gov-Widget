@@ -1,0 +1,26 @@
+node_modules
+.discourse-site
+
+# Additional ignores
+.DS_Store
+*.log
+.env
+*.swp
+*.swo
+*~
+
+# Additional ignores
+.DS_Store
+*.log
+.env
+*.swp
+*.swo
+*~
+
+# Additional ignores
+.DS_Store
+*.log
+.env
+*.swp
+*.swo
+*~

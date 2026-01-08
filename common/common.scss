@@ -1,0 +1,32 @@
+@import "governance-widgets";
+
+.cgov-theme-settings-page {
+  &.adv-settings-hidden {
+    .settings.control-unit {
+      .theme-setting {
+        display: none;
+      }
+
+      [data-setting="auto_proposal_fetching"],
+      [data-setting="auto_proposal_fetching_tags"],
+      [data-setting="auto_proposal_fetching_categories"] {
+        display: block;
+      }
+
+      [data-setting="auto_proposal_fetching_categories"] {
+        h2,
+        br {
+          display: none;
+        }
+      }
+    }
+  }
+
+  .control-unit:has(.translation-selector-container) {
+    display: none;
+  }
+
+  .toggle-advanced-settings {
+    margin-bottom: var(--space-4);
+  }
+}

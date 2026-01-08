@@ -1,0 +1,121 @@
+auto_proposal_fetching:
+  default: true
+  type: bool
+
+auto_proposal_fetching_tags:
+  default: ""
+  type: list
+  list_type: tag
+
+auto_proposal_fetching_categories:
+  default: ""
+  type: list
+  list_type: category
+
+proposal_domains:
+  default: "testnet.snapshot.box|snapshot.org|snapshot.box|app.aave.com|tally.xyz"
+  type: list
+
+manual_proposal_fetching:
+  default: true
+  type: bool
+
+manual_proposal_fetching_tags:
+  default: ""
+  type: list
+  list_type: tag
+
+manual_proposal_fetching_categories:
+  default: ""
+  type: list
+  list_type: category
+
+aave_subgraph_api_key:
+  default: "9e7b4a29889ac6c358b235230a5fe940"
+  type: string
+
+enable_aave_fetching:
+  default: true
+  type: bool
+
+aave_fetching_tags:
+  default: ""
+  type: list
+  list_type: tag
+
+aave_fetching_categories:
+  default: ""
+  type: list
+  list_type: category
+
+enable_tally_fetching:
+  default: false
+  type: bool
+
+tally_fetching_tags:
+  default: ""
+  type: list
+  list_type: tag
+
+tally_fetching_categories:
+  default: ""
+  type: list
+  list_type: category
+
+tally_organization_slug:
+  default: "compound"
+  type: string
+
+tally_subgraph_api_key:
+  default: "538b633a73718a93a36586cf0ab2ac9f84c7a4aa3521f89a6fb00ac1e4cd0fdc"
+  type: string
+
+enable_snapshot_fetching:
+  default: true
+  type: bool
+
+snapshot_fetching_tags:
+  default: ""
+  type: list
+  list_type: tag
+
+snapshot_fetching_categories:
+  default: ""
+  type: list
+  list_type: category
+
+snapshot_spaces:
+  default: "comp-vote.eth"
+  type: list
+
+enable_tagless_snapshots:
+  default: true
+  type: bool
+
+enable_url_checking:
+  default: true
+  type: bool
+
+data_explorer_query_id:
+  default: -1
+  type: integer
+
+data_explorer_api_key:
+  default: ""
+  type: string
+
+enable_testnet_snapshots:
+  default: true
+  type: bool
+
+testnet_snapshot_spaces:
+  default: "discoursewidget.eth|endedwidgettest.eth"
+  type: list
+
+auto_proposals_cache_ttl:
+  default: 300
+  type: integer
+
+auto_proposals_refresh_interval:
+  default: 2
+  type: integer

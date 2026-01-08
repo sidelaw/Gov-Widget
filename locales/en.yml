@@ -1,0 +1,36 @@
+en:
+  theme_metadata:
+    description: ""
+    settings:
+      auto_proposal_fetching: "Enable automatic proposal fetching based on the topic URL"
+      auto_proposal_fetching_tags: "Enable automatic proposal fetching for specific tags"
+      auto_proposal_fetching_categories: |
+        Enable automatic proposal fetching in specific categories
+        <br><br><br>
+        <h2>Advanced Settings</h2>
+
+  widget:
+    stage:
+      tally: "Tally (On-Chain)"
+      aip: "AIP (On-Chain)"
+      arfc: "ARFC (Snapshot)"
+      tempcheck: "Temp Check (Snapshot)"
+      snapshot: Snapshot
+    proposal:
+      title: "Proposal"
+      votes: "Votes"
+      for: "For"
+      against: "Against"
+      abstain: "Abstain"
+      quorum: "Quorum"
+      loading: "Loading..."
+      starts_in: "Starts in"
+      time_left: "left"
+      ended: "Ended"
+      error_loading: "Error loading proposal."
+      vote_on_snapshot: "Vote on Snapshot"
+      vote_on_aave: "Vote on Aave"
+      vote_on_tally: "Vote on Tally"
+      view_on_snapshot: "View on Snapshot"
+      view_on_aave: "View on Aave"
+      view_on_tally: "View on Tally"
