@@ -1,6 +1,6 @@
 import { TALLY_V3_SUBGRAPH } from "../constants";
 import { fetchJson } from "../fetch";
-import { formatProposalUrl } from "../url-parser.js";
+import { formatProposalUrl, validateDiscussionUrl } from "../url-parser.js";
 
 export class TallyFetcher {
   constructor(baseApi) {
@@ -57,14 +57,14 @@ export class TallyFetcher {
       return Promise.resolve([]);
     }
 
-    const cachedProposal = this.baseApi.findPersistentCache(
+    /*const cachedProposal = this.baseApi.findPersistentCache(
       { type: "tally", id: "orgId", topicId },
       orgId
     );
 
     if (cachedProposal) {
       return Promise.resolve(cachedProposal);
-    }
+    }*/
 
     return this.fetchProposals({
       orgId,
@@ -89,6 +89,7 @@ export class TallyFetcher {
             url: `https://www.tally.xyz/gov/${settings.tally_organization_slug}/proposal/${proposal.chainId}/?govId=${proposal.govId}`,
           }),
           loaded: true,
+          topicId,
         },
       ];
     });
@@ -198,19 +199,16 @@ query Proposals($orgId: IntID!, $limit: Int!, $sortBy: ProposalsSortBy!, $isDesc
           return [];
         }
 
-        if (settings.enable_url_checking) {
-          proposals = proposals.filter(
-            (proposal) => proposal.metadata?.discourseURL === topicURL
-          );
-        }
-
+        proposals = proposals.filter((proposal) =>
+          validateDiscussionUrl(proposal.metadata?.discourseURL, topicURL)
+        );
         if (proposals.length === 0) {
           return [];
         }
 
         return [this.processProposalData(proposals[0])];
       },
-      { ttl: settings.auto_proposals_cache_ttl, ignoreCache }
+      { ttl: settings.auto_proposals_cache_ttl * 1000, ignoreCache }
     );
   }
 

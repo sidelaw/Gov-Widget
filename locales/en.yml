@@ -9,6 +9,13 @@ en:
         <br><br><br>
         <h2>Advanced Settings</h2>
 
+      auto_proposals_cache_ttl: "Time-to-live (TTL) for the auto proposals cache in seconds"
+      auto_proposals_refresh_interval: "Interval (in seconds) for refreshing the auto proposals"
+      auto_proposals_snapshot_order_direction: "Order direction for fetched snapshot proposals (ascending or descending)"
+      rate_limit_every_ms: "Minimum interval (in milliseconds) between API requests (per type) to avoid rate limiting"
+      scroll_minimize_threshold_px: "Scroll distance (in pixels) required when scrolling down before minimizing widgets"
+      scroll_expand_threshold_px: "Scroll distance (in pixels) required when scrolling up before expanding minimized widgets"
+
   widget:
     stage:
       tally: "Tally (On-Chain)"
@@ -34,3 +41,5 @@ en:
       view_on_snapshot: "View on Snapshot"
       view_on_aave: "View on Aave"
       view_on_tally: "View on Tally"
+      show_more: "Show more"
+      show_less: "Show less"

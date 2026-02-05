@@ -12,8 +12,12 @@ auto_proposal_fetching_categories:
   type: list
   list_type: category
 
+enable_tag_checking_in_topic_title:
+  default: false
+  type: bool
+
 proposal_domains:
-  default: "testnet.snapshot.box|snapshot.org|snapshot.box|app.aave.com|tally.xyz"
+  default: "testnet.snapshot.box|snapshot.org|snapshot.box|app.aave.com|vote.onaave.com|tally.xyz"
   type: list
 
 manual_proposal_fetching:
@@ -85,7 +89,7 @@ snapshot_fetching_categories:
   list_type: category
 
 snapshot_spaces:
-  default: "comp-vote.eth"
+  default: "comp-vote.eth|aavedao.eth"
   type: list
 
 enable_tagless_snapshots:
@@ -105,7 +109,7 @@ data_explorer_api_key:
   type: string
 
 enable_testnet_snapshots:
-  default: true
+  default: false
   type: bool
 
 testnet_snapshot_spaces:
@@ -117,5 +121,36 @@ auto_proposals_cache_ttl:
   type: integer
 
 auto_proposals_refresh_interval:
-  default: 2
+  default: 60
   type: integer
+
+auto_proposals_snapshot_limit:
+  default: 100
+  type: integer
+  min: 20
+  max: 1000
+
+auto_proposals_snapshot_order_direction:
+  default: "asc"
+  type: enum
+  values:
+    - asc
+    - desc
+
+rate_limit_every_ms:
+  default: 1000
+  type: integer
+  min: 0
+  max: 10000
+
+scroll_minimize_threshold_px:
+  default: 100
+  type: integer
+  min: 0
+  max: 1000
+
+scroll_expand_threshold_px:
+  default: 500
+  type: integer
+  min: 0
+  max: 10000

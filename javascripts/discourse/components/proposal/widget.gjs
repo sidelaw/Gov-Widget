@@ -2,6 +2,7 @@ import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
 import { fn } from "@ember/helper";
 import { action } from "@ember/object";
+import didInsert from "@ember/render-modifiers/modifiers/did-insert";
 import { service } from "@ember/service";
 import { htmlSafe } from "@ember/template";
 import DButton from "discourse/components/d-button";
@@ -11,8 +12,9 @@ import { number } from "discourse/lib/formatter";
 import { eq, or } from "discourse/truth-helpers";
 import { i18n } from "discourse-i18n";
 import {
+  cleanTitle,
   getStatusClass,
-  ONE_DAY_MS,
+  TWELVE_HOURS,
   VOTE_ENDED_STATUSES,
 } from "../../lib/constants";
 
@@ -25,6 +27,9 @@ export default class Widget extends Component {
   @tracked
   showResults = this.isVoteActive || this.isVotePending || this.isVoteUpcoming;
   @tracked hidden = false;
+  @tracked titleExpanded = false;
+  @tracked isTitleTruncated = false;
+  @tracked loadingVotes = false;
 
   constructor() {
     super(...arguments);
@@ -33,6 +38,7 @@ export default class Widget extends Component {
       this.proposal = this.args.proposal;
       this.error = this.args.proposal.error || null;
       this.loading = false;
+      this.loadVotesIfNeeded();
     } else {
       this.loadProposal();
     }
@@ -63,6 +69,8 @@ export default class Widget extends Component {
           topicId
         );
       }
+
+      this.loadVotesIfNeeded();
     } catch (e) {
       this.error = e.message || "Failed to load proposal";
     } finally {
@@ -70,9 +78,37 @@ export default class Widget extends Component {
     }
   }
 
+  async loadVotesIfNeeded() {
+    const { type } = this.args;
+
+    if (type === "aip" && this.proposal?.needsDetailedVotes) {
+      this.loadingVotes = true;
+      try {
+        const updatedProposal = await this.baseApi.aave.updateProposalWithVotes(
+          this.proposal
+        );
+        this.proposal = updatedProposal;
+      } catch (e) {
+        console.warn("Failed to load votes for proposal:", e);
+      } finally {
+        this.loadingVotes = false;
+      }
+    }
+  }
+
   @action
   closeWidget() {
     this.hidden = true;
+  }
+
+  @action
+  toggleTitle() {
+    this.titleExpanded = !this.titleExpanded;
+  }
+
+  @action
+  checkTitleTruncation(element) {
+    this.isTitleTruncated = element.scrollWidth > element.clientWidth;
   }
 
   get stageLabel() {
@@ -108,6 +144,10 @@ export default class Widget extends Component {
 
     const platform = typeMap[type];
     return i18n(themePrefix(`widget.proposal.${prefix}_${platform}`));
+  }
+
+  get cleanedTitle() {
+    return cleanTitle(this.proposal?.title || "");
   }
 
   get status() {
@@ -163,16 +203,32 @@ export default class Widget extends Component {
   }
 
   get isVoteEndingSoon() {
-    return this.proposal?.end - Date.now() <= ONE_DAY_MS;
+    const endTime = new Date(this.proposal.end).getTime();
+    const now = Date.now();
+    return endTime - now <= TWELVE_HOURS && endTime > now;
   }
 
   get quorumMet() {
     return this.proposal?.totalVotes >= this.proposal?.quorum;
   }
 
+  get isAAVEProposal() {
+    return (
+      ["snapshot", "aip"].includes(this.args.type) &&
+      location.hostname.endsWith("aave.com")
+    );
+  }
+
   <template>
     {{#unless this.hidden}}
-      <div class="aave-widget {{@type}} {{this.status}}">
+      <div
+        class={{concatClass
+          "aave-widget"
+          @type
+          this.status
+          (if @isMinimized "minimized")
+        }}
+      >
         <div class="widget-header">
           <div class="widget-stage">{{this.stageLabel}}</div>
           <div class="widget-status {{this.status}}">
@@ -183,8 +239,38 @@ export default class Widget extends Component {
             @icon="xmark"
             @ariaLabel="Close proposal widget"
             @title="Close proposal widget"
-            class="btn-flat btn-small"
+            class="btn-flat btn-small close-widget"
           />
+          {{#if this.isAAVEProposal}}
+            <div class="widget-title">
+              <div
+                class={{concatClass
+                  "title-content"
+                  (if this.titleExpanded "expanded")
+                }}
+                {{didInsert this.checkTitleTruncation}}
+              >
+                {{this.cleanedTitle}}
+              </div>
+              {{#if this.isTitleTruncated}}
+                <DButton
+                  class="title-toggle btn-small btn-flat btn-transparent"
+                  @suffixIcon={{if
+                    this.titleExpanded
+                    "chevron-up"
+                    "chevron-down"
+                  }}
+                  @action={{this.toggleTitle}}
+                >
+                  {{#if this.titleExpanded}}
+                    {{i18n (themePrefix "widget.proposal.show_less")}}
+                  {{else}}
+                    {{i18n (themePrefix "widget.proposal.show_more")}}
+                  {{/if}}
+                </DButton>
+              {{/if}}
+            </div>
+          {{/if}}
         </div>
 
         {{#if this.loading}}
@@ -199,22 +285,33 @@ export default class Widget extends Component {
         {{else if this.proposal}}
           <div class="widget-content">
             {{#if this.isVoteActive}}
-              <div class="time-remaining">
+              <div
+                class={{concatClass
+                  "time-remaining"
+                  (if this.isVoteEndingSoon "ending-soon")
+                }}
+              >
                 {{#if this.isVoteEndingSoon}}
                   <span class="ending-soon-icon">⚠️</span>
                 {{/if}}
-                {{this.endDate}}
-                {{i18n (themePrefix "widget.proposal.time_left")}}
+                <strong>
+                  {{this.endDate}}
+                  {{i18n (themePrefix "widget.proposal.time_left")}}
+                </strong>
               </div>
             {{else if this.isVoteUpcoming}}
               <div class="time-starting">
-                {{i18n (themePrefix "widget.proposal.starts_in")}}
-                {{this.startDate}}
+                <strong>
+                  {{i18n (themePrefix "widget.proposal.starts_in")}}
+                  {{this.startDate}}
+                </strong>
               </div>
             {{else if this.isVoteEnded}}
               <div class="time-ended">
-                {{i18n (themePrefix "widget.proposal.ended")}}
-                {{this.endDate}}
+                <strong>
+                  {{i18n (themePrefix "widget.proposal.ended")}}
+                  {{this.endDate}}
+                </strong>
               </div>
             {{/if}}
 
@@ -244,24 +341,32 @@ export default class Widget extends Component {
                   </div>
                 {{/if}}
 
-                <div class="vote-results">
+                <div class="vote-results {{if this.loadingVotes 'loading'}}">
                   <div class="vote-summary">
-                    <span class="vote-option for">
+                    <span class="vote-option-choice for">
                       <span class="vote-label">For:</span>
-                      <span class="vote-value">{{number
-                          this.proposal.votes.for.count
-                        }}</span>
+                      <span class="vote-value">
+                        {{#if this.loadingVotes}}
+                          <span class="spinner"></span>
+                        {{else}}
+                          {{number this.proposal.votes.for.count}}
+                        {{/if}}
+                      </span>
                     </span>
                     |
-                    <span class="vote-option against">
+                    <span class="vote-option-choice against">
                       <span class="vote-label">Against:</span>
-                      <span class="vote-value">{{number
-                          this.proposal.votes.against.count
-                        }}</span>
+                      <span class="vote-value">
+                        {{#if this.loadingVotes}}
+                          <span class="spinner"></span>
+                        {{else}}
+                          {{number this.proposal.votes.against.count}}
+                        {{/if}}
+                      </span>
                     </span>
                     {{#if (or (eq @type "tally") (eq @type "snapshot"))}}
                       |
-                      <span class="vote-option abstain">
+                      <span class="vote-option-choice abstain">
                         <span class="vote-label">Abstain:</span>
                         <span class="vote-value">{{number
                             this.proposal.votes.abstain.count

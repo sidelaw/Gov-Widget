@@ -207,3 +207,45 @@ export function extractProposalsFromElement(element) {
     ),
   ]);
 }
+
+export function extractTopicKey(url) {
+  try {
+    const u = new URL(url);
+    // /t/392321
+    // /t/slug/392321
+    // /t/slug/392321/193
+    const match = u.pathname.match(/^\/t\/(?:[^\/]+\/)?(\d+)(?:\/|$)/);
+    if (!match) {
+      return null;
+    }
+    const topicId = match[1];
+    return `${u.host}:${topicId}`;
+  } catch {
+    return null;
+  }
+}
+
+export function validateDiscussionUrl(url1, url2) {
+  if (!url1 || !url2) {
+    return false;
+  }
+
+  if (!settings.enable_url_checking) {
+    return true;
+  }
+
+  return extractTopicKey(url1) === extractTopicKey(url2);
+}
+
+export function dedupeUrls(list = []) {
+  const seenUrls = new Set();
+
+  return list.filter((proposal) => {
+    if (seenUrls.has(proposal.url)) {
+      return false;
+    } else {
+      seenUrls.add(proposal.url);
+      return true;
+    }
+  });
+}

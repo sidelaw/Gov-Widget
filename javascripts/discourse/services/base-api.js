@@ -13,6 +13,7 @@ export default class BaseApiService extends Service {
 
   loading = new Map();
   promises = new Map();
+  lastRequestTime = new Map();
 
   constructor() {
     super(...arguments);
@@ -38,11 +39,40 @@ export default class BaseApiService extends Service {
       return this.promises.get(cacheKey);
     }
 
+    await this._enforceRateLimit(cacheKey);
+
     this.loading.set(cacheKey, true);
     const promise = this._executeAndCache(cacheKey, fetchFn, ttl);
     this.promises.set(cacheKey, promise);
 
     return promise;
+  }
+
+  async _enforceRateLimit(cacheKey) {
+    const apiType = this._getApiType(cacheKey);
+    const now = Date.now();
+    const minInterval = settings.rate_limit_every_ms;
+    const lastRequest = this.lastRequestTime.get(apiType) || 0;
+
+    const nextAvailableTime = Math.max(lastRequest + minInterval, now);
+    const waitTime = nextAvailableTime - now;
+
+    this.lastRequestTime.set(apiType, nextAvailableTime);
+
+    if (waitTime > 0) {
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+    }
+  }
+
+  _getApiType(cacheKey) {
+    if (cacheKey.startsWith("snapshot")) {
+      return "snapshot";
+    } else if (cacheKey.startsWith("aave") || cacheKey.startsWith("aip")) {
+      return "aave";
+    } else if (cacheKey.startsWith("tally")) {
+      return "tally";
+    }
+    return "unknown";
   }
 
   async _executeAndCache(cacheKey, fetchFn, ttl) {
@@ -70,6 +100,16 @@ export default class BaseApiService extends Service {
       ); // 30 days
     } catch {
       console.info(`Failed to set persistent cache for ${cacheKey}`);
+    }
+  }
+
+  clearPersistentCache({ type, id, topicId }) {
+    const cacheKey = `${type}-${id}-${topicId}`;
+    try {
+      persistentCache.remove(cacheKey);
+      persistentCache.remove(cacheKey + ":expires");
+    } catch {
+      console.info(`Failed to clear persistent cache for ${cacheKey}`);
     }
   }
 

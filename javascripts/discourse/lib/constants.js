@@ -5,7 +5,7 @@ export const SNAPSHOT_TESTNET_BASE_URL = "https://testnet.snapshot.org";
 export const SNAPSHOT_TESTNET_GRAPHQL_ENDPOINT =
   "https://testnet.hub.snapshot.org/graphql";
 export const SNAPSHOT_URL_REGEX =
-  /https?:\/\/(?:www\.)?(?:snapshot\.org|snapshot\.box|testnet\.snapshot\.box)\/#\/([^\/\s<>"']+)\/(?:proposal\/)?([a-zA-Z0-9]+)/gi;
+  /https?:\/\/(?:www\.)?(?:snapshot\.org|snapshot\.box|testnet\.snapshot\.box|testnet\.snapshot\.org)\/#\/([^\/\s<>"']+)\/(?:proposal\/)?([a-zA-Z0-9]+)/gi;
 export const AIP_URL_REGEX =
   /https?:\/\/(?:www\.)?(?:app\.aave\.com\/governance[^\s<>"']*|vote\.onaave\.com[^\s<>"']*|governance\.aave\.com\/(?!t\/)[^\s<>"']+)/gi;
 export const TALLY_URL_REGEX =
@@ -47,7 +47,7 @@ const STATUS_CLASS_PER_TYPE_MAP = {
     queued: "pending",
     executed: "executed",
 
-    cancelled: "failed",
+    cancelled: "cancelled",
     failed: "failed",
 
     expired: "expired",
@@ -95,6 +95,7 @@ export const STATUS_CLASS_PRIORITY = {
   pending: 3,
   executed: 4,
   closed: 5,
+  cancelled: 6, // aip
   failed: 6,
   inactive: 7,
   expired: 7,
@@ -107,6 +108,7 @@ export const VOTE_ENDED_STATUSES = [
   "pending",
   "executed",
   "closed",
+  "cancelled",
   "failed",
   "expired",
   "passed",
@@ -116,6 +118,7 @@ export const VOTE_ENDED_STATUSES = [
 export const PROPOSAL_ENDED_STATUSES = [
   "executed",
   "closed",
+  "cancelled",
   "failed",
   "expired",
   "passed",
@@ -123,7 +126,36 @@ export const PROPOSAL_ENDED_STATUSES = [
 ];
 
 export function getStatusPriority(status, type) {
-  return STATUS_CLASS_PRIORITY[getStatusClass(status, type)];
+  return (
+    STATUS_CLASS_PRIORITY[getStatusClass(status, type)] ??
+    DEFAULT_STATUS_PRIORITY
+  );
+}
+
+const TITLE_REGEX =
+  /^(?:\s*[^\]]*?\s*(?:\[?(arf?c[\s\-_–—]*(?:addendum)?|temp(?:erature)?[\s\-_–—]*check)\]?)\s*[-:\.]?\s*)?(.*)$/i;
+
+export function cleanTitle(title) {
+  if (!title || typeof title !== "string") {
+    return "";
+  }
+
+  return title
+    .replace("[ARFC - Temp check]", "")
+    .replace(TITLE_REGEX, "$2")
+    .trim();
+}
+
+export function extractSnapshotStageFromTitle(title) {
+  const stage = title.replace(TITLE_REGEX, "$1").trim().toLowerCase();
+
+  if (stage.includes("arfc") || stage.includes("arc")) {
+    return "arfc";
+  } else if (stage.includes("temp")) {
+    return "temp-check";
+  }
+
+  return null;
 }
 
 export const DEFAULT_STATUS_PRIORITY = 99;
@@ -131,9 +163,10 @@ export const DEFAULT_STATUS_PRIORITY = 99;
 // Widget display constants
 export const MAX_WIDGETS = 3;
 export const WIDGET_GAP_PX = 20;
-export const DEBOUNCE_DELAY_MS = 30;
+export const DEBOUNCE_DELAY_MS = 10;
 
 export const SHORT_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // Time constants
 export const ONE_DAY_MS = 86400000; // 24 hours
+export const TWELVE_HOURS = 43200000; // 12 hours

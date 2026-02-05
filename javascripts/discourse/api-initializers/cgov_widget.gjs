@@ -2,6 +2,7 @@ import { next } from "@ember/runloop";
 import { apiInitializer } from "discourse/lib/api";
 import PreviewProposal from "../components/proposal/preview";
 import {
+  dedupeUrls,
   extractProposalsFromElement,
   extractProposalsFromText,
 } from "../lib/url-parser";
@@ -13,7 +14,10 @@ export default apiInitializer((api) => {
 
   router.on("routeDidChange", () => {
     proposalsCache.clear();
+    proposalsCache.addItems([{ type: "placeholder", url: null }]); // Add placeholder to avoid component tearing down
+
     appEvents.trigger("proposals-cache:refresh");
+    appEvents.trigger("widget:check-position");
   });
 
   if (!settings.manual_proposal_fetching) {
@@ -24,16 +28,28 @@ export default apiInitializer((api) => {
   let currentPostRaw = null;
 
   api.onAppEvent("composer:open", ({ model }) => {
+    if (proposalsCache.isTopicIgnored()) {
+      return;
+    }
+
     currentPostRaw = model.post?.raw;
   });
 
   api.onAppEvent("composer:opened", () => {
+    if (proposalsCache.isTopicIgnored()) {
+      return;
+    }
+
     document
       .querySelectorAll(".d-editor-preview .proposal-preview")
       .forEach((el) => currentComposerProposalUrls.add(el.dataset.proposalUrl));
   });
 
   api.onAppEvent("composer:cancelled", () => {
+    if (proposalsCache.isTopicIgnored()) {
+      return;
+    }
+
     if (currentPostRaw) {
       const proposals = extractProposalsFromText(currentPostRaw);
       const toRemove = Array.from(currentComposerProposalUrls.values()).filter(
@@ -44,15 +60,17 @@ export default apiInitializer((api) => {
       });
 
       if (proposals.length) {
-        proposalsCache.removeAutoFetchedItems();
+        proposalsCache.addItems(proposals);
+        proposalsCache.loadAllProposalData(-1);
       }
-
-      proposalsCache.addItems(proposals);
-      proposalsCache.loadAllProposalData(-1);
     }
   });
 
   api.onAppEvent("composer:closed", () => {
+    if (proposalsCache.isTopicIgnored()) {
+      return;
+    }
+
     currentComposerProposalUrls.clear();
     currentPostRaw = null;
   });
@@ -64,15 +82,31 @@ export default apiInitializer((api) => {
     let proposals = [];
 
     if (model) {
+      if (proposalsCache.isTopicIgnored(model.topic_id)) {
+        return;
+      }
+
       proposals = extractProposalsFromText(model.cooked);
-    } else {
-      proposals = extractProposalsFromElement(element);
+      proposals = dedupeUrls(proposals);
+      proposals = proposals.map((proposal) => {
+        proposal.fetch = "manual";
+        return proposal;
+      });
 
       next(async () => {
         if (proposals.length) {
-          proposalsCache.removeAutoFetchedItems();
+          proposalsCache.addItems(proposals);
+          await proposalsCache.loadAllProposalData(model.topic_id);
         }
+      });
+    } else {
+      if (proposalsCache.isTopicIgnored()) {
+        return;
+      }
 
+      proposals = extractProposalsFromElement(element);
+
+      next(async () => {
         currentComposerProposalUrls.forEach((url) => {
           if (!proposals.length || !proposals.find((p) => p.url === url)) {
             proposalsCache.removeItemFromUrl(url);
@@ -84,42 +118,27 @@ export default apiInitializer((api) => {
           proposalsCache.addItems([{ type: "placeholder", url: null }]);
         }
 
-        proposals.forEach((proposal) => {
-          proposal.fetch = "manual";
-          currentComposerProposalUrls.add(proposal.url);
-        });
+        if (proposals.length) {
+          proposals.forEach((proposal) => {
+            proposal.fetch = "manual";
+            currentComposerProposalUrls.add(proposal.url);
+          });
 
-        proposalsCache.addItems(proposals);
-        await proposalsCache.loadAllProposalData(-1);
+          proposalsCache.addItems(proposals);
+          await proposalsCache.loadAllProposalData(-1);
 
-        if (
-          !proposalsCache.items.filter((p) => p.type !== "placeholder").length
-        ) {
-          appEvents.trigger("proposals-cache:refresh");
+          if (
+            !proposalsCache.items.filter((p) => p.type !== "placeholder").length
+          ) {
+            appEvents.trigger("proposals-cache:refresh");
+          }
         }
       });
     }
 
     if (proposals.length > 0) {
-      const seenUrls = new Set();
-      proposals = proposals.filter((proposal) => {
-        if (seenUrls.has(proposal.url)) {
-          return false;
-        } else {
-          seenUrls.add(proposal.url);
-          return true;
-        }
-      });
-
-      if (model) {
-        next(async () => {
-          proposalsCache.addItems(proposals);
-          proposalsCache.loadAllProposalData(model.topic_id);
-        });
-      }
-
       proposals.reverse().forEach((proposal) => {
-        const link = element.querySelector("a[href='" + proposal.url + "']");
+        const link = element.querySelector("a[href^='" + proposal.url + "']");
         if (!link) {
           return;
         }
@@ -128,6 +147,16 @@ export default apiInitializer((api) => {
         );
 
         const elementToReplace = onebox || link;
+
+        const parent = link.parentElement;
+        if (
+          !onebox &&
+          (!parent ||
+            parent.tagName !== "P" ||
+            parent.textContent.trim() !== link.textContent.trim())
+        ) {
+          return;
+        }
 
         const previewContainer = document.createElement("div");
         previewContainer.className = "proposal-preview";

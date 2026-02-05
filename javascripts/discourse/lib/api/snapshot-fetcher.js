@@ -1,12 +1,13 @@
 import { makeArray } from "discourse/lib/helpers";
 import {
+  extractSnapshotStageFromTitle,
   SNAPSHOT_BASE_URL,
   SNAPSHOT_GRAPHQL_ENDPOINT,
   SNAPSHOT_TESTNET_BASE_URL,
   SNAPSHOT_TESTNET_GRAPHQL_ENDPOINT,
 } from "../constants";
 import { fetchJson } from "../fetch";
-import { formatProposalUrl } from "../url-parser.js";
+import { formatProposalUrl, validateDiscussionUrl } from "../url-parser.js";
 
 const POSITIVE = [
   "for",
@@ -39,7 +40,12 @@ export class SnapshotFetcher {
     this.baseApi = baseApi;
   }
 
-  async autoFetchProposals({ topicURL, topicId, ignoreCache = false }) {
+  async autoFetchProposals({
+    topicURL,
+    topicId,
+    topicCreatedAt,
+    ignoreCache = false,
+  }) {
     // TODO: handles cache
 
     return this.fetchProposals({
@@ -47,10 +53,10 @@ export class SnapshotFetcher {
         ? settings.testnet_snapshot_spaces
         : settings.snapshot_spaces
       ).split("|"),
-      first: 20,
-      cutoff: moment().subtract(60, "days").unix(),
+      first: settings.auto_proposals_snapshot_limit,
+      startFrom: moment(topicCreatedAt).unix(),
       orderBy: "created",
-      orderDirection: "desc",
+      orderDirection: settings.auto_proposals_snapshot_order_direction,
       testnet: settings.enable_testnet_snapshots,
       topicURL,
       topicId,
@@ -70,19 +76,20 @@ export class SnapshotFetcher {
             id: proposal.id,
           }),
           loaded: true,
+          topicId,
         };
       });
     });
   }
 
   async fetchProposals({
-    spaces = ["comp-vote.eth"],
-    first = 20,
-    cutoff = 60,
-    orderBy = "created",
-    orderDirection = "desc",
-    testnet = false,
-    topicURL = "",
+    spaces,
+    first,
+    startFrom,
+    orderBy,
+    orderDirection,
+    testnet,
+    topicURL,
     topicId,
     ignoreCache,
   }) {
@@ -95,12 +102,12 @@ export class SnapshotFetcher {
         query Proposals(
           $spaces: [String!]!,
           $first: Int!,
-          $cutoff: Int!,
+          $startFrom: Int!,
           $orderBy: String!,
           $orderDirection: OrderDirection!
         ) {
           proposals(
-            where: { space_in: $spaces, created_gte: $cutoff }
+            where: { space_in: $spaces, created_gte: $startFrom }
             orderBy: $orderBy
             orderDirection: $orderDirection
             first: $first
@@ -145,7 +152,7 @@ export class SnapshotFetcher {
             variables: {
               spaces: makeArray(spaces),
               first,
-              cutoff,
+              startFrom,
               orderBy,
               orderDirection,
             },
@@ -156,12 +163,9 @@ export class SnapshotFetcher {
           return [];
         }
 
-        let foundProposals = response.data.proposals;
-        if (settings.enable_url_checking) {
-          foundProposals = foundProposals.filter(
-            (proposal) => proposal.discussion === topicURL
-          );
-        }
+        const foundProposals = response.data.proposals.filter((proposal) =>
+          validateDiscussionUrl(proposal.discussion, topicURL)
+        );
 
         if (foundProposals.length === 0) {
           return [];
@@ -171,8 +175,92 @@ export class SnapshotFetcher {
           return this.processProposalData(proposal);
         });
       },
-      { ttl: settings.auto_proposals_cache_ttl, ignoreCache }
+      { ttl: settings.auto_proposals_cache_ttl * 1000, ignoreCache }
     );
+  }
+
+  async fetchTempcheckByTitle({
+    spaces = (settings.enable_testnet_snapshots
+      ? settings.testnet_snapshot_spaces
+      : settings.snapshot_spaces
+    ).split("|"),
+    first,
+    orderBy = "created",
+    orderDirection = "desc",
+    testnet = settings.enable_testnet_snapshots,
+    topicId,
+    title,
+  }) {
+    const cacheKey = `snapshots:tempcheck:${topicId}`;
+
+    return this.baseApi.fetchWithCache(cacheKey, async () => {
+      const query = `query Proposals(
+          $spaces: [String!]!,
+          $first: Int!,
+          $orderBy: String!,
+          $orderDirection: OrderDirection!
+          $title: String!
+        ) {
+          proposals(
+            where: { space_in: $spaces, title_contains: $title }
+            orderBy: $orderBy
+            orderDirection: $orderDirection
+            first: $first
+          ) {
+            id
+            title
+            body
+            choices
+            start
+            end
+            snapshot
+            state
+            author
+            created
+            discussion
+            scores
+            scores_total
+            scores_updated
+            space {
+              id
+              name
+            }
+            quorum
+            quorumType
+            type
+            flagged
+          }
+        }`;
+
+      const endpoint = testnet
+        ? SNAPSHOT_TESTNET_GRAPHQL_ENDPOINT
+        : SNAPSHOT_GRAPHQL_ENDPOINT;
+
+      const response = await fetchJson(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query,
+          variables: {
+            spaces: makeArray(spaces),
+            first,
+            orderBy,
+            orderDirection,
+            title,
+          },
+        }),
+      });
+
+      if (!response?.data?.proposals || !response.data.proposals.length) {
+        return [];
+      }
+
+      return response.data.proposals.map((proposal) => {
+        return this.processProposalData(proposal);
+      });
+    });
   }
 
   async fetchProposal(space, id, topicId, testnet = false) {
@@ -343,14 +431,24 @@ export class SnapshotFetcher {
   }
 
   getStage(proposal) {
-    if (
-      /temp\s*check/i.test(proposal.title) ||
-      /temp\s*check/i.test(proposal.body)
-    ) {
-      return "temp-check";
-    } else if (/arfc/i.test(proposal.title) || /arfc/i.test(proposal.body)) {
-      return "arfc";
+    const title = proposal.title || "";
+    const body = proposal.body || "";
+
+    if (title) {
+      const stage = extractSnapshotStageFromTitle(title);
+      if (stage) {
+        return stage;
+      }
     }
+
+    if (body) {
+      const slicedBody = body.slice(0, 1000);
+      const stage = extractSnapshotStageFromTitle(slicedBody);
+      if (stage) {
+        return stage;
+      }
+    }
+
     return "snapshot";
   }
 
@@ -372,6 +470,7 @@ export class SnapshotFetcher {
       discussion: proposal.discussion,
       state: proposal.state,
       space: proposal.space.id,
+      url: `${settings.enable_testnet_snapshots ? SNAPSHOT_TESTNET_BASE_URL : SNAPSHOT_BASE_URL}/#/${proposal.space.id}/proposal/${proposal.id}`,
       status,
       stage,
 

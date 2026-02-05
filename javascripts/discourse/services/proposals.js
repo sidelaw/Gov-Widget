@@ -6,8 +6,23 @@ export default class Proposals extends Service {
 
   @tracked cache = [];
 
+  ignoreTopics = new Set();
+  topicId = null;
+
   get items() {
     return this.cache;
+  }
+
+  setTopicId(topic) {
+    this.topicId = topic;
+  }
+
+  addTopicToIgnore(topicId) {
+    this.ignoreTopics.add(topicId);
+  }
+
+  isTopicIgnored(topicId) {
+    return this.ignoreTopics.has(topicId || this.topicId);
   }
 
   addItems(proposals) {
@@ -15,6 +30,27 @@ export default class Proposals extends Service {
       return;
     }
     proposals.forEach((proposal) => this.addItem(proposal));
+  }
+
+  addOrUpdateItems(proposals) {
+    proposals.forEach((proposal) => {
+      const existingIndex = this.cache.findIndex(
+        (p) =>
+          (p.type === "tally" &&
+            p.chainId === proposal.id &&
+            p.govId === proposal.govId) ||
+          p.id === proposal.id
+      );
+
+      if (existingIndex !== -1) {
+        this.cache[existingIndex] = {
+          ...this.cache[existingIndex],
+          ...proposal,
+        };
+      } else {
+        this.cache = [...this.cache, proposal];
+      }
+    });
   }
 
   addItem(proposal) {

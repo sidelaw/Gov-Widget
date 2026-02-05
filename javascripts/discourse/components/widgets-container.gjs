@@ -1,17 +1,18 @@
 import Component from "@glimmer/component";
-import { tracked } from "@glimmer/tracking";
+import { cached, tracked } from "@glimmer/tracking";
 import { action } from "@ember/object";
 import didInsert from "@ember/render-modifiers/modifiers/did-insert";
 import didUpdate from "@ember/render-modifiers/modifiers/did-update";
 import willDestroy from "@ember/render-modifiers/modifiers/will-destroy";
-import { cancel, schedule } from "@ember/runloop";
+import { cancel, later, next, schedule } from "@ember/runloop";
 import { service } from "@ember/service";
-import ConditionalLoadingSpinner from "discourse/components/conditional-loading-spinner";
+import concatClass from "discourse/helpers/concat-class";
 import discourseDebounce from "discourse/lib/debounce";
 import { bind } from "discourse/lib/decorators";
 import { getAbsoluteURL } from "discourse/lib/get-url";
 import { not } from "discourse/truth-helpers";
 import {
+  cleanTitle,
   DEBOUNCE_DELAY_MS,
   getStatusClass,
   getStatusPriority,
@@ -19,9 +20,15 @@ import {
   PROPOSAL_ENDED_STATUSES,
   WIDGET_GAP_PX,
 } from "../lib/constants";
-import { extractProposalsFromTopic } from "../lib/url-parser";
+import {
+  dedupeUrls,
+  extractProposalsFromTopic,
+  validateDiscussionUrl,
+} from "../lib/url-parser";
 import ConditionalOverflowNav from "./conditional-overflow-nav";
 import Widget from "./proposal/widget";
+
+const SCROLL_STATE_CHANGE_COOLDOWN_MS = 500;
 
 export default class WidgetsContainer extends Component {
   @service proposals;
@@ -31,12 +38,51 @@ export default class WidgetsContainer extends Component {
   @tracked showAsSidebar = false;
   @tracked loading = true;
   @tracked error = null;
+  @tracked isMinimized = false;
+
+  lastScrollY = 0;
+  lastStateChange = 0;
+  scrollListenerActive = false;
 
   constructor() {
     super(...arguments);
 
+    if (this.shouldIgnoreTopic) {
+      this.loading = false;
+      return;
+    }
+
     this.extractProposals();
-    this.startBackgroundRefresh();
+    document.body.classList.add("checking-proposals");
+
+    later(() => this.startBackgroundRefresh(), 1000);
+  }
+
+  get shouldIgnoreTopic() {
+    const { topic } = this.args;
+
+    if (!topic) {
+      return false;
+    }
+
+    this.proposals.setTopicId(topic.id);
+
+    if (!settings.enable_tag_checking_in_topic_title) {
+      return false;
+    }
+
+    const validTopicTag = !!topic.title
+      .match(
+        /\[(direct[\s+\-]to[\s+\-]aip|aip|arfc\s*addendum|arfc|temp(?:erature)? check)\]/i
+      )?.[1]
+      ?.toLowerCase();
+
+    if (!validTopicTag) {
+      this.proposals.addTopicToIgnore(topic.id);
+      return true;
+    }
+
+    return false;
   }
 
   getDockedWidthPx(widget) {
@@ -47,9 +93,27 @@ export default class WidgetsContainer extends Component {
     return Number.isFinite(widthFloat) && widthFloat > 0 ? widthFloat : 0;
   }
 
-  checkPosition() {
+  checkPosition({ hasProposals } = {}) {
     const wrapper = document.querySelector("#main-outlet-wrapper");
-    if (!wrapper || !this.widgetsContainer) {
+    if (!wrapper) {
+      return;
+    }
+
+    const headerWrap = document.querySelector(".d-header .wrap");
+
+    wrapper.style.transition = "";
+    if (headerWrap) {
+      headerWrap.style.transition = "";
+    }
+
+    wrapper.style.marginLeft = "";
+    wrapper.style.marginRight = "";
+    if (headerWrap) {
+      headerWrap.style.marginLeft = "";
+      headerWrap.style.marginRight = "";
+    }
+
+    if (!this.widgetsContainer) {
       return;
     }
 
@@ -59,13 +123,47 @@ export default class WidgetsContainer extends Component {
       : window.innerWidth;
 
     const spaceRight = viewportWidth - wrapperRect.right;
+    const spaceLeft = wrapperRect.left;
     const widgetWidth = this.getDockedWidthPx(this.widgetsContainer);
+    const widgetNeeds = widgetWidth + WIDGET_GAP_PX;
 
-    this.showAsSidebar = spaceRight >= widgetWidth + WIDGET_GAP_PX;
-    this.widgetsContainer.classList.toggle(
-      "widgets-on-side",
-      this.showAsSidebar
-    );
+    let showAsSidebar = false;
+
+    if (spaceRight >= widgetNeeds) {
+      showAsSidebar = true;
+    } else if (!this.loading && hasProposals) {
+      const totalSpace = spaceLeft + spaceRight;
+      if (totalSpace >= widgetNeeds) {
+        showAsSidebar = true;
+
+        const remainingSpace = totalSpace - widgetNeeds;
+        const idealLeftSpace = remainingSpace / 2;
+
+        wrapper.style.marginLeft = `${idealLeftSpace}px`;
+        wrapper.style.marginRight = `${widgetNeeds}px`;
+        if (headerWrap) {
+          headerWrap.style.marginLeft = "0px";
+          headerWrap.style.marginRight = `${widgetNeeds}px`;
+        }
+      }
+    }
+
+    this.showAsSidebar = showAsSidebar;
+    this.updateScrollListener();
+  }
+
+  updateScrollListener() {
+    const shouldListen = !this.showAsSidebar;
+
+    if (shouldListen && !this.scrollListenerActive) {
+      this.lastScrollY = window.scrollY;
+      window.addEventListener("scroll", this.handleScroll, { passive: true });
+      this.scrollListenerActive = true;
+    } else if (!shouldListen && this.scrollListenerActive) {
+      window.removeEventListener("scroll", this.handleScroll);
+      this.scrollListenerActive = false;
+      this.isMinimized = false;
+    }
   }
 
   @bind
@@ -73,8 +171,65 @@ export default class WidgetsContainer extends Component {
     this.checkPositionTimer = discourseDebounce(
       this,
       this.checkPosition,
+      { hasProposals: this.sortedProposals?.length > 0 },
       DEBOUNCE_DELAY_MS
     );
+  }
+
+  @bind
+  handleScroll() {
+    if (this.scrollRAF) {
+      return;
+    }
+
+    this.scrollRAF = requestAnimationFrame(() => {
+      this.scrollRAF = null;
+      this.processScroll();
+    });
+  }
+
+  processScroll() {
+    const now = Date.now();
+    const currentScrollY = window.scrollY;
+    const scrollDelta = currentScrollY - this.lastScrollY;
+
+    const isScrollingDown = scrollDelta > 0;
+    const isScrollingUp = scrollDelta < 0;
+
+    const isNearTop = currentScrollY < settings.scroll_expand_threshold_px;
+    const threshold = isScrollingDown
+      ? settings.scroll_minimize_threshold_px
+      : isNearTop
+        ? 0
+        : settings.scroll_expand_threshold_px;
+
+    if (Math.abs(scrollDelta) < threshold) {
+      return;
+    }
+
+    if (now - this.lastStateChange < SCROLL_STATE_CHANGE_COOLDOWN_MS) {
+      return;
+    }
+
+    let stateChanged = false;
+
+    if (
+      isScrollingDown &&
+      currentScrollY > settings.scroll_minimize_threshold_px &&
+      !this.isMinimized
+    ) {
+      this.isMinimized = true;
+      stateChanged = true;
+    } else if (isScrollingUp && this.isMinimized) {
+      this.isMinimized = false;
+      stateChanged = true;
+    }
+
+    if (stateChanged) {
+      this.lastStateChange = now;
+    }
+
+    this.lastScrollY = currentScrollY;
   }
 
   @action
@@ -82,12 +237,10 @@ export default class WidgetsContainer extends Component {
     this.widgetsContainer = element;
     this.resizeHandler = new ResizeObserver(this.checkPositionDebounced);
     this.resizeHandler.observe(document.documentElement);
-    this.checkPosition();
+    this.checkPosition({ hasProposals: this.sortedProposals?.length > 0 });
 
-    this.appEvents.on(
-      "proposals-cache:refresh",
-      this.autoExtractProposalsDeferred
-    );
+    this.appEvents.on("proposals-cache:refresh", this.onProposalsCacheRefresh);
+    this.appEvents.on("widget:check-position", this.checkPosition);
   }
 
   @action
@@ -96,10 +249,32 @@ export default class WidgetsContainer extends Component {
     this.endBackgroundRefresh();
     cancel(this.checkPositionTimer);
 
-    this.appEvents.off(
-      "proposals-cache:refresh",
-      this.autoExtractProposalsDeferred
-    );
+    if (this.scrollRAF) {
+      cancelAnimationFrame(this.scrollRAF);
+      this.scrollRAF = null;
+    }
+
+    if (this.scrollListenerActive) {
+      window.removeEventListener("scroll", this.handleScroll);
+      this.scrollListenerActive = false;
+    }
+
+    this.appEvents.off("proposals-cache:refresh", this.onProposalsCacheRefresh);
+    this.appEvents.off("widget:check-position", this.checkPosition);
+  }
+
+  @bind
+  async onProposalsCacheRefresh() {
+    if (this.isDestroying || this.isDestroyed) {
+      return;
+    }
+
+    if (this.proposals.isTopicIgnored(this.topicId)) {
+      return;
+    }
+
+    await this.autoExtractProposalsDeferred();
+    await this.checkTempcheckByTitle();
   }
 
   startBackgroundRefresh() {
@@ -176,10 +351,6 @@ export default class WidgetsContainer extends Component {
       return;
     }
 
-    if (!this.hasAutoProposals && this.hasManualLoadedProposals) {
-      return;
-    }
-
     const { ignoreCache } = options;
     const { topic } = this.args;
 
@@ -188,17 +359,22 @@ export default class WidgetsContainer extends Component {
       return;
     }
 
-    if (
-      this.canAutoFetchProposals &&
-      (!this.canManualFetchProposals || !this.hasManualLoadedProposals)
-    ) {
+    if (this.autoLoading) {
+      console.info("Auto-loading already in progress, skipping this run.");
+      return;
+    }
+
+    if (this.canAutoFetchProposals) {
       let promises = [];
+
+      this.autoLoading = true;
 
       if (this.canFetchProposalsBy({ mode: "type", prefix: "snapshot" })) {
         promises.push(
           this.baseApi.snapshot.autoFetchProposals({
             topicURL: this.topicUrl,
             topicId: this.topicId,
+            topicCreatedAt: topic.created_at,
             ignoreCache,
           })
         );
@@ -228,13 +404,57 @@ export default class WidgetsContainer extends Component {
         const proposals = await Promise.all(promises);
         const foundProposals = proposals.flat();
 
-        if (!this.hasAutoProposals && this.hasManualLoadedProposals) {
+        if (foundProposals.length) {
+          this.proposals.addOrUpdateItems(foundProposals);
+        }
+      }
+
+      this.autoLoading = false;
+    }
+  }
+
+  async checkTempcheckByTitle() {
+    // Special case: if we have an ARFC but a temp-check exists in another topic.
+    // Checking by title.
+    const sortedProposals = this.sortedProposals;
+    if (sortedProposals.length === 0) {
+      return;
+    }
+
+    const arfc = sortedProposals.find((p) => p.stage === "arfc");
+    const hasTempcheck = sortedProposals.some((p) => p.stage === "temp-check");
+
+    if (arfc && !hasTempcheck) {
+      const title = cleanTitle(arfc.title);
+      if (!title.length) {
+        return;
+      }
+
+      const possibleTempcheck =
+        await this.baseApi.snapshot.fetchTempcheckByTitle({
+          first: settings.auto_proposals_snapshot_limit,
+          topicURL: this.topicUrl,
+          topicId: this.topicId,
+          ignoreCache: false,
+          title,
+        });
+
+      if (possibleTempcheck.length) {
+        const tempChecksProposals = possibleTempcheck
+          .filter((p) => p.stage === "temp-check")
+          .map((p) => ({
+            ...p,
+            type: "snapshot",
+            fetch: "auto",
+            linkedArfcId: arfc.id,
+          }));
+
+        if (tempChecksProposals.length === 0) {
           return;
         }
 
-        if (foundProposals.length) {
-          this.proposals.addItems(foundProposals);
-        }
+        this.proposals.addItems(tempChecksProposals);
+        await this.proposals.loadAllProposalData(this.topicId);
       }
     }
   }
@@ -251,8 +471,10 @@ export default class WidgetsContainer extends Component {
       try {
         if (this.canManualFetchProposals) {
           const foundProposals = await extractProposalsFromTopic(topic);
-          const filteredProposals = foundProposals.filter((proposal) =>
-            this.canFetchProposalsBy({ mode: "type", prefix: proposal.type })
+          const filteredProposals = dedupeUrls(
+            foundProposals.filter((proposal) =>
+              this.canFetchProposalsBy({ mode: "type", prefix: proposal.type })
+            )
           );
 
           if (filteredProposals.length) {
@@ -265,22 +487,15 @@ export default class WidgetsContainer extends Component {
             await this.proposals.loadAllProposalData(this.topicId);
           }
         }
-
-        if (this.hasManualLoadedProposals) {
-          console.info("Manual proposals found, skipping auto-fetching.");
-          return;
-        }
-
-        console.info(
-          "No manual proposals found, proceeding with auto-fetching."
-        );
-
-        this.autoExtractProposalsDeferred();
+        await this.autoExtractProposalsDeferred();
+        await this.checkTempcheckByTitle();
       } catch (error) {
-        console.error("Failed to load proposals:", error);
+        console.warn("Failed to load proposals:", error);
         this.error = error.message || "Failed to load proposals";
       } finally {
         this.loading = false;
+        document.body.classList.remove("checking-proposals");
+        this.checkPosition({ hasProposals: this.sortedProposals?.length > 0 });
       }
     });
   }
@@ -290,7 +505,7 @@ export default class WidgetsContainer extends Component {
   }
 
   get topicId() {
-    return this.args.topic.id;
+    return this.args.topic?.id;
   }
 
   get topicTags() {
@@ -302,7 +517,11 @@ export default class WidgetsContainer extends Component {
   }
 
   get hasProposals() {
-    return this.proposals.items.length > 0;
+    return this.proposals.items.length > 0 && !this.shouldIgnoreTopic;
+  }
+
+  get hasPlaceholderProposals() {
+    return this.proposals.items.some((p) => p.type === "placeholder");
   }
 
   get hasAutoProposals() {
@@ -318,7 +537,9 @@ export default class WidgetsContainer extends Component {
 
   get loadedProposals() {
     return this.proposals.items.filter(
-      (p) => p.loaded && this.validateDiscussionUrl(p.discussion)
+      (p) =>
+        p.loaded &&
+        (p.linkedArfcId || validateDiscussionUrl(p.discussion, this.topicUrl))
     );
   }
 
@@ -334,10 +555,7 @@ export default class WidgetsContainer extends Component {
     return this.loadedProposals.filter((p) => p.type === "tally");
   }
 
-  validateDiscussionUrl(url) {
-    return url && (!settings.enable_url_checking || url === this.topicUrl);
-  }
-
+  @cached
   get sortedProposals() {
     let proposals = [
       ...this.tallyProposals,
@@ -375,9 +593,20 @@ export default class WidgetsContainer extends Component {
       }
     };
 
-    const sorted = proposals.sort((a, b) => {
-      const statusA = getStatusPriority(a.status);
-      const statusB = getStatusPriority(b.status);
+    const compareProposalsWithFetch = (a, b) => {
+      const fetchA = a.fetch === "manual" ? 1 : 0;
+      const fetchB = b.fetch === "manual" ? 1 : 0;
+
+      if (fetchA !== fetchB) {
+        return fetchB - fetchA;
+      }
+
+      return compareProposals(a, b);
+    };
+
+    const compareProposals = (a, b) => {
+      const statusA = getStatusPriority(a.status, a.type);
+      const statusB = getStatusPriority(b.status, b.type);
 
       if (statusA !== statusB) {
         return statusA - statusB;
@@ -391,44 +620,37 @@ export default class WidgetsContainer extends Component {
           ? secondaryA.value - secondaryB.value
           : secondaryB.value - secondaryA.value;
       }
-    });
 
-    const allTypes = [...new Set(sorted.map((p) => p.stage))];
+      return 0;
+    };
 
-    let maxPerType;
-    if (allTypes.length >= MAX_WIDGETS) {
-      maxPerType = 1;
-    } else if (allTypes.length === 2) {
-      maxPerType = 2;
-    } else {
-      maxPerType = MAX_WIDGETS;
+    const byStage = proposals.reduce((acc, p) => {
+      (acc[p.stage] ||= []).push(p);
+      return acc;
+    }, {});
+
+    const top = (stage, n = 1) =>
+      (byStage[stage] ?? []).toSorted(compareProposalsWithFetch).slice(0, n);
+
+    let selected = [...top("tally"), ...top("aip"), ...top("arfc")];
+
+    selected.push(...top("temp-check", MAX_WIDGETS - selected.length));
+
+    if (selected.length < MAX_WIDGETS) {
+      const pickedSet = new Set(selected);
+      const leftovers = proposals
+        .filter((p) => !pickedSet.has(p))
+        .toSorted(compareProposalsWithFetch);
+
+      selected.push(...leftovers.slice(0, MAX_WIDGETS - selected.length));
     }
 
-    const selected = [];
-    let typeCounts = { "temp-check": 0, arfc: 0, aip: 0, tally: 0 };
-
-    if (settings.enable_tagless_snapshots) {
-      typeCounts["snapshot"] = 0;
-    }
-
-    for (const proposal of sorted) {
-      const type = proposal.stage;
-
-      if (
-        typeCounts[type] < maxPerType ||
-        (selected.length < MAX_WIDGETS &&
-          Object.values(typeCounts).every((count) => count === 0))
-      ) {
-        selected.push(proposal);
-        typeCounts[type]++;
-      }
-
-      if (selected.length >= MAX_WIDGETS) {
-        break;
-      }
-    }
-
+    selected = selected.toSorted(compareProposals).slice(0, MAX_WIDGETS);
     if (selected.length > 0) {
+      next(() => this.checkPosition({ hasProposals: true }));
+    }
+
+    if (settings.enable_url_checking && selected.length > 0) {
       selected.forEach((proposal) => {
         if (
           PROPOSAL_ENDED_STATUSES.includes(
@@ -453,7 +675,11 @@ export default class WidgetsContainer extends Component {
   <template>
     {{#if this.hasProposals}}
       <div
-        class="aave-widgets-container"
+        class={{concatClass
+          "aave-widgets-container"
+          (if this.showAsSidebar "widgets-on-side")
+          (if this.isMinimized "minimized")
+        }}
         {{didInsert this.setup}}
         {{didUpdate this.extractProposals}}
         {{willDestroy this.teardown}}
@@ -462,23 +688,23 @@ export default class WidgetsContainer extends Component {
           <div class="widgets-error">
             <p>{{this.error}}</p>
           </div>
-        {{else}}
-          <ConditionalLoadingSpinner @condition={{this.loading}}>
-            <ConditionalOverflowNav @condition={{not this.showAsSidebar}}>
-              {{#each this.sortedProposals as |proposal|}}
-                <Widget
-                  @type={{proposal.type}}
-                  @space={{proposal.space}}
-                  @proposalId={{proposal.id}}
-                  @govId={{proposal.govId}}
-                  @testnet={{proposal.testnet}}
-                  @url={{proposal.url}}
-                  @topicId={{this.topicId}}
-                  @proposal={{proposal}}
-                />
-              {{/each}}
-            </ConditionalOverflowNav>
-          </ConditionalLoadingSpinner>
+        {{else if this.loading}}{{else}}
+          <ConditionalOverflowNav @condition={{not this.showAsSidebar}}>
+            {{#each this.sortedProposals as |proposal|}}
+              <Widget
+                @type={{proposal.type}}
+                @space={{proposal.space}}
+                @proposalId={{proposal.id}}
+                @govId={{proposal.govId}}
+                @testnet={{proposal.testnet}}
+                @url={{proposal.url}}
+                @topicId={{this.topicId}}
+                @proposal={{proposal}}
+                @isMinimized={{this.isMinimized}}
+              />
+            {{/each}}
+          </ConditionalOverflowNav>
+
         {{/if}}
       </div>
     {{/if}}

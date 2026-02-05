@@ -1,5 +1,5 @@
 {
-  "name": "compound-governance-widget",
+  "name": "Governace Widget",
   "component": true,
   "authors": "Arkshine",
   "about_url": "TODO: Put your theme's public repo or Meta topic URL here",
@@ -10,6 +10,11 @@
   "maximum_discourse_version": null,
   "assets": {},
   "modifiers": {
-    "svg_icons": ["far-circle-check", "far-circle-xmark"]
+    "svg_icons": [
+      "far-circle-check",
+      "far-circle-xmark",
+      "chevron-up",
+      "chevron-down"
+    ]
   }
 }

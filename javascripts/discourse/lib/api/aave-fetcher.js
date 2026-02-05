@@ -12,13 +12,23 @@ export class AaveFetcher {
   }
 
   async autoFetchProposals({ topicURL, topicId, ignoreCache }) {
+    // Should be removed later.
+    // Currently kept to fix issues with previous cached data.
     const cachedProposal = this.baseApi.findPersistentCache({
       type: "aip",
       topicId,
     });
 
     if (cachedProposal) {
-      return Promise.resolve(cachedProposal);
+      if (cachedProposal.end <= 0) {
+        this.baseApi.clearPersistentCache({
+          type: "aip",
+          id: cachedProposal.id,
+          topicId,
+        });
+      } else {
+        //return Promise.resolve(cachedProposal);
+      }
     }
 
     return this.fetchProposals({
@@ -33,22 +43,18 @@ export class AaveFetcher {
         return [];
       }
 
-      let proposal = proposals[0];
-      if (proposal instanceof Promise) {
-        proposal = await proposal;
-      }
-
-      return [
-        {
+      return proposals.map((proposal) => {
+        return {
           ...proposal,
           ...formatProposalUrl({
             type: "aip",
             id: proposal.id,
-            url: `https://app.aave.com/governance/v3/proposal/?proposalId=${proposal.id}`,
+            url: `https://vote.onaave.com/proposal/?proposalId=${proposal.id}`,
           }),
           loaded: true,
-        },
-      ];
+          topicId,
+        };
+      });
     });
   }
 
@@ -101,6 +107,18 @@ export class AaveFetcher {
               active {
                 timestamp
               }
+              executed {
+                timestamp
+              }
+              queued {
+                timestamp
+              }
+              failed {
+                timestamp
+              }
+              canceled {
+                timestamp
+              }
             }
             votingConfig {
               id
@@ -135,9 +153,13 @@ export class AaveFetcher {
           return [];
         }
 
-        return [this.processProposalData(proposals[0])];
+        return await Promise.all(
+          proposals.map(async (proposal) => {
+            return this.processProposalData(proposal);
+          })
+        );
       },
-      { ttl: settings.auto_proposals_cache_ttl, ignoreCache }
+      { ttl: settings.auto_proposals_cache_ttl * 1000, ignoreCache }
     );
   }
 
@@ -178,6 +200,18 @@ export class AaveFetcher {
               active {
                 timestamp
               }
+              executed {
+                timestamp
+              }
+              queued {
+                timestamp
+              }
+              failed {
+                timestamp
+              }
+              canceled {
+                timestamp
+              }
             }
             votingConfig {
               id
@@ -209,44 +243,83 @@ export class AaveFetcher {
   }
 
   async fetchProposalVotes(id) {
-    const query = `
-      {
-        voteEmitteds(where: { proposalId: "${id}"}) {
-          id
-          votingPower
-          support
+    const cacheKey = `aave:proposal:votes:${id}`;
+
+    return this.baseApi.fetchWithCache(cacheKey, async () => {
+      const query = `
+        {
+          voteEmitteds(where: { proposalId: "${id}"}) {
+            id
+            votingPower
+            support
+          }
         }
+      `;
+
+      const response = await fetchJson(AAVE_SUBGRAPH_VOTES, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query }),
+      });
+
+      const voteEmitteds = response.data?.voteEmitteds;
+      if (!voteEmitteds || voteEmitteds.length === 0) {
+        return [];
       }
-    `;
 
-    const response = await fetchJson(AAVE_SUBGRAPH_VOTES, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query }),
+      let data = {
+        for: 0,
+        against: 0,
+      };
+
+      voteEmitteds.forEach((vote) => {
+        const power = Number(this.formatBigInt(vote.votingPower, 18));
+        if (vote.support) {
+          data.for += power;
+        } else {
+          data.against += power;
+        }
+      });
+
+      return data;
     });
+  }
 
-    const voteEmitteds = response.data?.voteEmitteds;
-    if (!voteEmitteds || voteEmitteds.length === 0) {
-      throw new Error("Votes not found");
+  async updateProposalWithVotes(proposal) {
+    if (!proposal.needsDetailedVotes) {
+      return proposal;
     }
 
-    let data = {
-      for: 0,
-      against: 0,
-    };
+    try {
+      const votesData = await this.fetchProposalVotes(proposal.id);
+      const forVotes = votesData.for;
+      const againstVotes = votesData.against;
+      const totalVotes = forVotes + againstVotes;
 
-    voteEmitteds.forEach((vote) => {
-      const power = Number(this.formatBigInt(vote.votingPower, 18));
-      if (vote.support) {
-        data.for += power;
-      } else {
-        data.against += power;
-      }
-    });
+      const forPercent = totalVotes > 0 ? (forVotes / totalVotes) * 100 : 0;
+      const againstPercent =
+        totalVotes > 0 ? (againstVotes / totalVotes) * 100 : 0;
 
-    return data;
+      return {
+        ...proposal,
+        totalVotes,
+        votes: {
+          for: { count: forVotes, percent: forPercent },
+          against: { count: againstVotes, percent: againstPercent },
+          abstain: { count: 0, percent: 0 },
+        },
+        needsDetailedVotes: false,
+      };
+    } catch (error) {
+      console.warn(
+        "Failed to fetch detailed votes for proposal ID:",
+        proposal.id,
+        error
+      );
+      return proposal;
+    }
   }
 
   parseFrontMatter(text) {
@@ -293,10 +366,11 @@ export class AaveFetcher {
     return `${integer}.${fraction}`.replace(/\.?0+$/, "");
   }
 
-  async processProposalData(proposal) {
-    let hasVotes =
-      proposal.votes && proposal.votes.forVotes && proposal.votes.againstVotes;
+  async processProposalData(proposal, { fetchVotes = false } = {}) {
+    let hasVotes = proposal.votes !== null;
     let hasDetailsVotes = false;
+    let needsDetailedVotes =
+      !hasVotes && PROPOSAL_STATES[proposal.state] !== "created";
 
     let forVotes = 0;
     let againstVotes = 0;
@@ -308,12 +382,13 @@ export class AaveFetcher {
     let start = 0;
     let end = 0;
 
-    if (!hasVotes && PROPOSAL_STATES[proposal.state] !== "created") {
+    if (needsDetailedVotes && fetchVotes) {
       try {
         const votesData = await this.fetchProposalVotes(proposal.proposalId);
         hasDetailsVotes = true;
         forVotes = votesData.for;
         againstVotes = votesData.against;
+        needsDetailedVotes = false;
       } catch {
         console.warn(
           "Failed to fetch detailed votes for proposal ID:",
@@ -337,16 +412,24 @@ export class AaveFetcher {
       againstPercent = totalVotes > 0 ? (againstVotes / totalVotes) * 100 : 0;
     }
 
-    if (proposal.transactions.active || proposal.transactions.created) {
+    if (proposal.transactions.active) {
+      start = Number(proposal.transactions.active.timestamp);
+    } else if (proposal.transactions.created) {
       start =
-        Number(
-          proposal.transactions.active?.timestamp ||
-            proposal.transactions.created?.timestamp
-        ) * 1000;
+        Number(proposal.transactions.created?.timestamp) +
+        proposal.votingConfig.cooldownBeforeVotingStart;
     }
 
-    if (proposal.votingDuration) {
-      end = start + Number(proposal.votingDuration) * 1000;
+    if (proposal.transactions.canceled) {
+      end = Number(proposal.transactions.canceled.timestamp);
+    } else if (proposal.transactions.queued) {
+      end = Number(proposal.transactions.queued.timestamp);
+    } else if (proposal.transactions.executed) {
+      end = Number(proposal.transactions.executed.timestamp);
+    } else if (proposal.transactions.failed) {
+      end = Number(proposal.transactions.failed.timestamp);
+    } else if (proposal.votingConfig.votingDuration) {
+      end = start + proposal.votingConfig.votingDuration;
     }
 
     const discourseUrl = this.parseFrontMatter(
@@ -364,8 +447,8 @@ export class AaveFetcher {
       status: PROPOSAL_STATES[proposal.state],
       stage: "aip",
 
-      start,
-      end,
+      start: start * 1000,
+      end: end * 1000,
 
       totalVotes,
       votes: {
@@ -373,6 +456,8 @@ export class AaveFetcher {
         against: { count: againstVotes, percent: againstPercent },
         abstain: { count: abstainVotes, percent: 0 },
       },
+
+      needsDetailedVotes,
     };
   }
 }
